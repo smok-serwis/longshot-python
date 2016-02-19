@@ -1,3 +1,3 @@
 
 
-from .device import LongshotDevice
+from .device import LongshotDevice, LongshotPathpoint
