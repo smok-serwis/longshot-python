@@ -21,7 +21,7 @@ class NoPersistenceLayer(object):
 
 class ShelfPersistenceLayer(object):
     def __init__(self, filename):
-        self.shelf = shelve.open(filename, protocol=-1)
+        self.shelf = shelve.open(str(filename), protocol=-1)
 
     def sync(self):
         self.shelf.sync()
