@@ -44,6 +44,7 @@ class LongshotThread(threading.Thread):
                 continue
 
             candidate_ts, candidate_v = tsv
+            candidate_ts /= 1000    # server expresses them in milliseconds
 
             did_server_value_win = False        # because if it does, we need to schedule a sync...
             if p.value is None:     # server value automatically wins...
@@ -72,6 +73,7 @@ class LongshotThread(threading.Thread):
         for pathpoint, value in r['writes'].iteritems():
 
             timestamp, value = value
+            timestamp = timestamp / 1000    # server counts in ms
 
             try:
                 pp = self.device.pathpoints[pathpoint]
@@ -278,7 +280,7 @@ class LongshotPathpoint(object):
 
         # Current value - timestamp, value
         self.value = None
-        self.timestamp = None
+        self.timestamp = None       # in seconds !
 
         self.synced = False          # Are there any new values that need to be sent to server?
         self.registered = False      # Has this been declared on the remote server?
