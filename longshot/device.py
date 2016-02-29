@@ -89,7 +89,6 @@ class LongshotThread(threading.Thread):
                                                                            'secret': self.device.secret,
                                                                            'paths_updated': paths_updated})
 
-
     def _syncvalues(self):
         # we did not break - this means there is a need to sync
         sync_dict = {}
@@ -325,7 +324,7 @@ class LongshotPathpoint(object):
         """
         Make timestamp and value sync to server at later time
         """
-        self.values_to_store.append((int(timestamp*1000), value))    # because server deals in ms
+        self.values_to_store.append((timestamp, value))    # because server deals in ms
         self.synced = False
 
     def _change(self, timestamp, value):
