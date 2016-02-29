@@ -96,10 +96,11 @@ class LongshotThread(threading.Thread):
 
         for pathpoint in self.device.pathpoints.values():
             if pathpoint.values_to_store:
-                sync_dict[pathpoint.path] = sorted(pathpoint.values_to_store)
-                pathpoint.values_to_store = []
+                    # server deals in MS
+                q = (ts * 1000, v for ts, v in pathpoint.values_to_store)
 
-        print 'syncing %s' % (sync_dict, )
+                sync_dict[pathpoint.path] = sorted(q)
+                pathpoint.values_to_store = []
 
         r = requests.post(self.api_root + '/v1/sync_values/', json={'device_id': self.device.device_id,
                                                                     'secret': self.device.secret,
