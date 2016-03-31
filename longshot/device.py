@@ -134,7 +134,13 @@ class _LongshotThread(threading.Thread):
 
 
     def run(self):
-        self._syncpaths()
+        while True:
+            try:
+                self._syncpaths()
+            except IOError:
+                time.sleep(20)
+            else:
+                break
 
         while not self.terminating:
             try:
