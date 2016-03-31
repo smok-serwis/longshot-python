@@ -8,5 +8,5 @@ setup(name='longshot',
       author='smok-serwis.pl',
       author_email='admin@smok.co',
       url='https://github.com/smok-serwis/longshot-python',
-      packages=['longshot'],
+      packages=['longshot', 'longshot.persistence'],
      )
