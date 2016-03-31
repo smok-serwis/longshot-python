@@ -97,10 +97,8 @@ def pathpoint_from_functions(path, device,
                                 default_value=None,
                                 default_timestamp=None):
     class FuncPathpoint(BasePathpoint):
-        def __init__(self):
-            if default_timestamp == 'now':
-                default_timestamp = time.time()
-            BasePathpoint.__init__(self, path, device, default_value, default_timestamp)
+        def __init__(self, dt):
+            BasePathpoint.__init__(self, path, device, default_value, dt)
 
         def on_write_arrived(self, timestamp, value):
             BasePathpoint.on_write_arrived(self, timestamp, value)
@@ -112,4 +110,4 @@ def pathpoint_from_functions(path, device,
             else:
                 return on_read_requested()
 
-    return FuncPathpoint()
+    return FuncPathpoint(default_timestamp if default_timestamp != 'now' else time.time())
