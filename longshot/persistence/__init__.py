@@ -5,6 +5,8 @@ class NoPersistenceLayer(object):
     """
     This is a base persistence layer for storing data. It stores current value of a sensor,
     and its historic value (in case net is broken and we need to restore later
+
+    Paths are to be stored WITHOUT prefix
     """
     def __init__(self):
         pass

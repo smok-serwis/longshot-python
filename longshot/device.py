@@ -5,12 +5,13 @@ import requests
 from .persistence import NoPersistenceLayer
 
 
-class LongshotThread(threading.Thread):
-    def __init__(self, device, api_root):
+class _LongshotThread(threading.Thread):
+    def __init__(self, device, api_root, pathpoint_prefix):
         threading.Thread.__init__(self)
         self.device = device
         self.api_root = api_root
         self.terminating = False
+        self.pathpoint_prefix = pathpoint_prefix
 
     def _syncpaths(self):
         """synchronize pathpoints against the server"""
@@ -20,7 +21,8 @@ class LongshotThread(threading.Thread):
                           json={
                               'device_id': self.device.device_id,
                               'secret': self.device.secret,
-                              'paths': all_pathpoints
+                              'paths': all_pathpoints,
+                              'prefix': self.pathpoint_prefix
                           })
 
         if r.status_code != 200:
@@ -34,72 +36,85 @@ class LongshotThread(threading.Thread):
         # in this session
 
         for path, tsv in r['values'].iteritems():
-
             try:
                 p = self.device.pathpoints[path]
             except KeyError:     # it might have been deleted while we were syncing!
                 continue
 
-            if p.registered:        # No need to check it.
+            if p.declared:        # No need to check it.
                 continue
 
-            candidate_ts, candidate_v = tsv
-            candidate_ts /= 1000    # server expresses them in milliseconds
-
-            did_server_value_win = False        # because if it does, we need to schedule a sync...
-            if p.value is None:     # server value automatically wins...
-                did_server_value_win = True
-            else: # there is a conflict
-                if candidate_ts > p.timestamp:
+            try:
+                candidate_ts, candidate_v = tsv
+                candidate_ts /= 1000    # server expresses them in milliseconds
+            except TypeError:   # tsv was None
+                did_server_value_win = False
+            else:
+                did_server_value_win = False        # because if it does, we need to schedule a sync...
+                if p.value is None:     # server value automatically wins...
                     did_server_value_win = True
+                else: # there is a conflict
+                    if candidate_ts > p.timestamp:
+                        did_server_value_win = True
 
             if did_server_value_win:
-                p._change(candidate_ts, candidate_v)
+                p.on_write_arrived(candidate_ts, candidate_v)
             else:
-                p._schedulesync(p.timestamp, p.value)
+                if not (p.timestamp is None or p.value is None):
+                    p.stored_values.append((p.timestamp, p.value))
+                    p.needs_sync = True
 
-            p.registered = True
+            p.declared = True
 
-    def _check_write_queue(self):
-        #todo hold writes for invalid paths
-        r = requests.post(self.api_root + '/v1/get_writes/',
+    def _check_order_queue(self):
+        r = requests.post(self.api_root + '/v1/get_orders/',
                           json={'device_id': self.device.device_id, 'secret': self.device.secret})
         if r.status_code != 200:
-            raise IOError('Failed to get writes')
+            raise IOError('Failed to get orders')
 
         r = r.json()
-        paths_updated = []
 
         for pathpoint, value in r['writes'].iteritems():
-
             timestamp, value = value
-            timestamp = timestamp / 1000    # server counts in ms
+            timestamp /= 1000    # server counts in ms
 
             try:
                 pp = self.device.pathpoints[pathpoint]
             except KeyError:
                 continue
             else:
-                paths_updated.append(pathpoint)
+                pp.on_write_arrived(timestamp, value)
 
-            pp._change(timestamp, value)
+        for pathpoint in r['reads']:
+            try:
+                pp = self.device.pathpoints[pathpoint]
+            except KeyError:
+                continue
 
-        if paths_updated:
-            r = requests.post(self.api_root + '/v1/confirm_writes/', json={'device_id': self.device.device_id,
-                                                                           'secret': self.device.secret,
-                                                                           'paths_updated': paths_updated})
+            v = pp.obtain_value()
+            if v is not None:
+                pp.stored_values.append((time.time(), v))
+                pp.needs_sync = True
+
+        if len(r['writes']) == len(r['reads']) == 0:
+            return
+        else:
+            requests.post(self.api_root + '/v1/confirm_orders/', json={'device_id': self.device.device_id,
+                                                                       'secret': self.device.secret,
+                                                                       'pot': r['pot']})
+
 
     def _syncvalues(self):
         # we did not break - this means there is a need to sync
         sync_dict = {}
 
         for pathpoint in self.device.pathpoints.values():
-            if pathpoint.values_to_store:
+            if pathpoint.stored_values:
                     # server deals in MS
-                q = (ts * 1000, v for ts, v in pathpoint.values_to_store)
+                q = ((ts * 1000, v) for ts, v in pathpoint.stored_values)
 
-                sync_dict[pathpoint.path] = sorted(q)
-                pathpoint.values_to_store = []
+                sync_dict[pathpoint.prefixed_path] = sorted(q)
+                pathpoint.stored_values = []
 
         r = requests.post(self.api_root + '/v1/sync_values/', json={'device_id': self.device.device_id,
                                                                     'secret': self.device.secret,
@@ -109,7 +124,7 @@ class LongshotThread(threading.Thread):
             # If you failed syncing, return the values to pool and try another time
             for path, values in sync_dict.iteritems():
                 try:
-                    self.device.pathpoints[path].values_to_store.extend(values)
+                    self.device.pathpoints[path].stored_values.extend([(ts/1000, v) for ts, v in values])
                 except KeyError:
                     pass
             raise IOError('Failed to sync')
@@ -127,11 +142,11 @@ class LongshotThread(threading.Thread):
                 if not self.device.paths_synced:
                     self._syncpaths()
 
-                # check write queue
-                self._check_write_queue()
+                # check order queue
+                self._check_order_queue()
 
                 need_to_sync = False
-                for synced in [pathpoint.synced for pathpoint in self.device.pathpoints.values()]:
+                for synced in [not pathpoint.needs_sync for pathpoint in self.device.pathpoints.values()]:
                     if not synced:
                         need_to_sync = True
                         break
@@ -140,31 +155,40 @@ class LongshotThread(threading.Thread):
                     self._syncvalues()
 
                 self.device.persistence.sync()
-                time.sleep(60)
+                time.sleep(30)
 
             except IOError:
                 pass
 
 
-class LongshotDevice(object):
+class Device(object):
     """
-    A root class that will do the interfacing for a single device
+    Class that presents a device registered in SMOK system.
     """
 
-    def __init__(self, device_id, secret, persistence_layer=None, longshot_path='http://longshot.smok4.development/'):
+    def __init__(self, device_id, secret,
+                                  persistence_layer=None,
+                                  longshot_path='http://longshot.smok-serwis.pl/',
+                                  pathpoint_prefix='l'):
         """
         Initialize the device
-        :param device_id: device ID
-        :param secret: device secret
-        :param longshot_path: Longshot API access
+        :param device_id: device ID, as assigned by SMOK administrator
+        :param secret: device secret, as assigned by SMOK administrator
+        :param longshot_path: Longshot API URL.
+        :param pathpoint_prefix: Pathpoint prefix. Will be automatically appended to defined pathpoints.
+            If prefix is 'l', pathpoint 'Waccess' will be reinterpreted as 'Wlaccess'.
+            before call to .register() all pathpoints with matching prefixes MUST be declared, or they
+            will be deleted.
+            Prefix is used to support linking multiple longshots on a single device ID.
         """
 
         self.device_id = device_id
         self.secret = secret
-        self.pathpoints = {}  # path name => LongshotPathpoint
+        self.prefix = pathpoint_prefix
+        self.pathpoints = {}  # path name (including prefix) => LongshotPathpoint
         self.done_registering = False       #: was .done() called?
         self.paths_synced = False           #: is there a need to synchronize patches?
-        self.thread = LongshotThread(self, longshot_path)
+        self.thread = _LongshotThread(self, longshot_path, pathpoint_prefix)
 
         self.persistence = persistence_layer or NoPersistenceLayer()
 
@@ -172,14 +196,17 @@ class LongshotDevice(object):
         """
         Unregister a path.
 
+        path has to be a prefixed path or a Pathpoint object
+
         Throws NameError if path was not registered previously
 
         :param path: path name
         """
-        if isinstance(path, LongshotPathpoint):
-            path = path.path
+        from .pathpoints import BasePathpoint
+        if isinstance(path, BasePathpoint):
+            path = path.prefixed_path
 
-        self.persistence.del_value(path)
+        self.persistence.del_current_value(path)
 
         try:
             del self.pathpoints[path]
@@ -189,51 +216,15 @@ class LongshotDevice(object):
         self.paths_synced = False
 
     def get(self, path):
-        """
-        Return LongshotPathpoint object for given path
+        """Obtain a pathpoint. Path is unprefixed.
+        Raises KeyError if does not exist"""
+        return self.pathpoints[path[0] + self.prefix + path[1:]]
 
-        Raises KeyError if not registered
-        """
-        return self.pathpoints[path]    # raises KeyError
+    def register(self, pathpoint):
+        """Register a Pathpoint object into this device"""
 
-    def register(self, path, default_value=None, default_timestamp=None):
-        """
-        Create and register new pathpoint.
-
-        :param path: path name
-
-        :param value: a candidate for pathpoint's value. This will be resolved against PersistenceLayer
-        :param timestamp: timestamp to use as candidate. Current timestamp if not None.
-
-        :return: LongshotPathpoint to interface with the pathpoint
-        :raises ValueError: pathpoint is currently registered!
-        """
-
-        default_timestamp = default_timestamp or time.time()
-
-        if path in self.pathpoints:
-            raise ValueError('Pathpoint exists!')
-
-        pp = LongshotPathpoint(path, self)
-
-        # Obtain the default value - read persistence
-        try:
-            timestamp, value = self.persistence.get_current_value(path)
-        except TypeError:   # None can't be unpacked. Use provided defaults
-            if default_value is not None:
-                pp.value = default_value
-                pp.timestamp = default_timestamp
-            # else, they just stay None. There is no value...
-        else:
-            # We have read persistence successfully. Try to anlyze provided default.
-            if default_value is not None:
-                if pp.timestamp < default_timestamp:        # default wins
-                    pp.value = default_value
-                    pp.timestamp = default_timestamp
-
+        self.pathpoints[pathpoint.prefixed_path] = pathpoint
         self.paths_synced = False
-        self.pathpoints[path] = pp
-        return pp
 
     def done(self):
         """
@@ -260,6 +251,11 @@ class LongshotDevice(object):
         self.thread.terminating = True
         self.thread.join()
 
+    def __eq__(self, other):
+        return self.device_id == other.device_id
+
+    def __hash__(self):
+        return hash(self.device_id)
 
 class LongshotPathpoint(object):
     """
@@ -282,7 +278,7 @@ class LongshotPathpoint(object):
         self.value = None
         self.timestamp = None       # in seconds !
 
-        self.synced = False          # Are there any new values that need to be sent to server?
+        self.synced = True          # Are there any new values that need to be sent to server?
         self.registered = False      # Has this been declared on the remote server?
 
         # default value will be loaded just now by LongshotDevice.register() that called this constructor
